@@ -23,6 +23,9 @@ python search.py "GW quasiparticle" -n 10
 # List all papers in the database
 python search.py --inspect-database
 
+# Remove an irrelevant paper by its ID
+python search.py --remove <paper-id>
+
 # Use a custom database path
 python search.py --db /path/to/papers.db "query"
 ```

@@ -40,6 +40,14 @@ python search.py --inspect-database
 
 Lists every paper in the database with title, authors, year, and URL.
 
+### 4. Remove a paper
+
+```bash
+python search.py --remove <paper-id>
+```
+
+Removes an irrelevant paper from the database. Use `--inspect-database` first to find the paper ID.
+
 ### Custom database path
 
 ```bash
@@ -74,6 +82,13 @@ To check what's already been collected:
 ```bash
 python search.py
 python search.py --inspect-database
+```
+
+To remove irrelevant papers after reviewing:
+
+```bash
+python search.py --inspect-database   # find the paper ID
+python search.py --remove <paper-id>  # remove it
 ```
 
 Papers are deduplicated automatically -- running the same query twice won't create duplicates.

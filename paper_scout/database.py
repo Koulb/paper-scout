@@ -123,3 +123,10 @@ def save_paper(conn: sqlite3.Connection, paper: dict) -> bool:
     )
     conn.commit()
     return True
+
+
+def remove_paper(conn: sqlite3.Connection, paper_id: str) -> bool:
+    """Remove a paper by its ID. Returns True if a row was deleted."""
+    cursor = conn.execute("DELETE FROM papers WHERE id = ?", (paper_id,))
+    conn.commit()
+    return cursor.rowcount > 0

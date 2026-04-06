@@ -5,11 +5,12 @@ Usage:
     python search.py                     Show database statistics
     python search.py <query>             Search for papers matching the query
     python search.py --inspect-database  List all papers in the database
+    python search.py --remove <id>       Remove a paper by its ID
 """
 
 import argparse
 
-from paper_scout.database import get_connection, count_papers, get_all_papers, save_paper
+from paper_scout.database import get_connection, count_papers, get_all_papers, save_paper, remove_paper
 from paper_scout.arxiv_search import search_arxiv
 from paper_scout.scholar_search import search_scholar
 
@@ -32,9 +33,18 @@ def cmd_inspect(conn):
         year = p["year"] or "n/a"
         authors = (p["authors"] or "")[:80]
         print(f"{i:4d}. [{year}] {p['title'][:90]}")
+        print(f"       ID: {p['id']}")
         print(f"       Authors: {authors}")
         print(f"       URL: {p['url'] or 'n/a'}")
         print()
+
+
+def cmd_remove(conn, paper_id: str):
+    """Remove a paper from the database by its ID."""
+    if remove_paper(conn, paper_id):
+        print(f"Removed paper: {paper_id}")
+    else:
+        print(f"No paper found with ID: {paper_id}")
 
 
 def cmd_search(conn, query: str, num_results: int = 5):
@@ -80,6 +90,10 @@ def main():
         help="Number of results per source (default: 5)",
     )
     parser.add_argument(
+        "--remove", metavar="ID",
+        help="Remove a paper by its ID (shown in --inspect-database output)",
+    )
+    parser.add_argument(
         "--db", default=None,
         help="Path to SQLite database (default: data/papers.db)",
     )
@@ -87,7 +101,9 @@ def main():
     args = parser.parse_args()
     conn = get_connection(args.db)
 
-    if args.inspect_database:
+    if args.remove:
+        cmd_remove(conn, args.remove)
+    elif args.inspect_database:
         cmd_inspect(conn)
     elif args.query:
         query = " ".join(args.query)
