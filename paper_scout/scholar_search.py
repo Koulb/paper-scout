@@ -1,13 +1,18 @@
 """Search Google Scholar for papers."""
 
-from scholarly import scholarly
-
 
 def search_scholar(query: str, num_results: int = 5) -> list[dict]:
     """Search for papers on Google Scholar.
 
     Returns a list of dicts with keys: title, authors, year, abstract, url, venue, citations.
     """
+    try:
+        from scholarly import scholarly
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Missing dependency 'scholarly'. Install with: pip install scholarly"
+        ) from exc
+
     results = []
     count = 0
 

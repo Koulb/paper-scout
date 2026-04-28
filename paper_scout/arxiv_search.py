@@ -1,13 +1,18 @@
 """Search arXiv for papers."""
 
-from arxiv import Client, Search, SortCriterion, SortOrder
-
 
 def search_arxiv(query: str, max_results: int = 5) -> list[dict]:
     """Search papers on arXiv.
 
     Returns a list of dicts with keys: title, authors, year, abstract, url, arxiv_id.
     """
+    try:
+        from arxiv import Client, Search, SortCriterion, SortOrder
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Missing dependency 'arxiv'. Install with: pip install arxiv"
+        ) from exc
+
     client = Client()
     search = Search(
         query=query,

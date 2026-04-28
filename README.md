@@ -1,12 +1,16 @@
 # Paper Scout
 
-Search for academic papers on **arXiv** and **Google Scholar** and store them in a local SQLite database. Papers are automatically deduplicated by title.
+Search for academic papers and store them in a local SQLite database. Papers are automatically deduplicated by title.
+
+Current implementation queries **arXiv** and **Google Scholar**. Treat source selection, ranking, and filtering policy as controlled by the latest instructions in the *paper-clib* chat, not by this README.
 
 ## Installation
 
 ```bash
 pip install arxiv scholarly
 ```
+
+Database-only commands work without those packages installed. Search commands need the relevant provider packages.
 
 ## Usage
 

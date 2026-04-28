@@ -1,12 +1,16 @@
 # Paper Scout Skill
 
-Search for academic papers on **arXiv** and **Google Scholar** and store them in a local SQLite database.
+Search for academic papers and store them in a local SQLite database.
+
+Current implementation can query **arXiv** and **Google Scholar**, but do **not** treat this file as the source of truth for search/ranking/filtering policy. Follow the latest instructions in the *paper-clib* chat for paper-selection behavior.
 
 ## Installation
 
 ```bash
 pip install arxiv scholarly
 ```
+
+Database-only commands work without those packages installed. Search commands need the relevant provider packages.
 
 ## Usage
 
@@ -26,7 +30,7 @@ Shows how many papers are in the database, broken down by source.
 python search.py "electron-phonon coupling beyond DFT"
 ```
 
-Searches both Google Scholar and arXiv for the given query. New papers are automatically deduplicated (by title hash) and saved to the database. Use `-n` to control results per source:
+Runs the current configured search workflow, saves new papers to the database, and deduplicates by title hash. Use `-n` to control results per source:
 
 ```bash
 python search.py "GW quasiparticle" -n 10
@@ -70,6 +74,8 @@ paper-scout/
 ```
 
 ## For agents
+
+Before doing topic-specific search/ranking/filtering work, check the latest instructions in the *paper-clib* chat. If those instructions conflict with this file, the chat wins.
 
 To find papers on a topic, run:
 

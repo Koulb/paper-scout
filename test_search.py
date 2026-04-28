@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Test that paper-scout can find beyond-DFT papers."""
 
+import importlib.util
 import os
 import tempfile
 import unittest
@@ -54,6 +55,7 @@ class TestDatabase(unittest.TestCase):
 class TestArxivSearch(unittest.TestCase):
     """Test that arXiv search returns beyond-DFT papers."""
 
+    @unittest.skipUnless(importlib.util.find_spec("arxiv"), "arxiv package not installed")
     def test_find_beyond_dft_papers(self):
         results = search_arxiv("electron-phonon coupling beyond DFT GW", max_results=5)
         self.assertGreater(len(results), 0, "arXiv search returned no results")
