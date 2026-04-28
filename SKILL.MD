@@ -2,7 +2,7 @@
 
 Search for academic papers and store them in a local SQLite database.
 
-Current implementation can query **arXiv** and **Google Scholar**, but do **not** treat this file as the source of truth for search/ranking/filtering policy. Follow the latest instructions in the *paper-clib* chat for paper-selection behavior.
+Current implementation can query **arXiv** and **Google Scholar**, but do **not** treat this file as the source of truth for search/ranking/filtering policy. Follow the latest instructions in the *paper-club* chat for paper-selection behavior.
 
 ## Installation
 
@@ -78,7 +78,7 @@ paper-scout/
 
 ## For agents
 
-Before doing topic-specific search/ranking/filtering work, check the latest instructions in the *paper-clib* chat. If those instructions conflict with this file, the chat wins.
+Before doing topic-specific search/ranking/filtering work, check the latest instructions in the *paper-club* chat. If those instructions conflict with this file, the chat wins.
 
 To find papers on a topic, run:
 

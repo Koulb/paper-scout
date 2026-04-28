@@ -3,7 +3,7 @@
 Use this file as the local mirror of the current paper-recommendation workflow.
 
 Authority order:
-1. Latest instructions from the *paper-clib* chat
+1. Latest instructions from the *paper-club* chat
 2. This file
 3. Older README / skill guidance
 
