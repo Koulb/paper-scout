@@ -22,18 +22,23 @@ def search_arxiv(query: str, max_results: int = 5) -> list[dict]:
     )
 
     results = []
-    for paper in client.results(search):
-        year = None
-        if paper.published:
-            year = paper.published.year
+    try:
+        for paper in client.results(search):
+            year = None
+            if paper.published:
+                year = paper.published.year
 
-        results.append({
-            "title": paper.title,
-            "authors": [a.name for a in paper.authors],
-            "year": year,
-            "abstract": (paper.summary or "")[:3000],
-            "url": paper.entry_id,
-            "arxiv_id": paper.entry_id.split("/")[-1] if paper.entry_id else "",
-        })
+            results.append({
+                "title": paper.title,
+                "authors": [a.name for a in paper.authors],
+                "year": year,
+                "abstract": (paper.summary or "")[:3000],
+                "url": paper.entry_id,
+                "arxiv_id": paper.entry_id.split("/")[-1] if paper.entry_id else "",
+            })
+    except Exception as exc:
+        if "429" in str(exc):
+            raise RuntimeError("arXiv rate-limited (HTTP 429). Retry later.") from exc
+        raise
 
     return results

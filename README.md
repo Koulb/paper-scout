@@ -7,38 +7,40 @@ Current implementation queries **arXiv** and **Google Scholar**. Treat source se
 ## Installation
 
 ```bash
-pip install arxiv scholarly
+python3 -m venv .venv
+./.venv/bin/pip install -r requirements.txt
 ```
 
 Database-only commands work without those packages installed. Search commands need the relevant provider packages.
+
+See `RECOMMENDATION_POLICY.md` for the standing paper-recommendation workflow and research tracks.
 
 ## Usage
 
 ```bash
 # Show database statistics
-python search.py
+./.venv/bin/python search.py
 
 # Search for papers
-python search.py "electron-phonon coupling beyond DFT"
+./.venv/bin/python search.py "electron-phonon coupling beyond DFT"
 
 # Search with more results per source
-python search.py "GW quasiparticle" -n 10
+./.venv/bin/python search.py "GW quasiparticle" -n 10
 
 # List all papers in the database
-python search.py --inspect-database
+./.venv/bin/python search.py --inspect-database
 
 # Remove an irrelevant paper by its ID
-python search.py --remove <paper-id>
+./.venv/bin/python search.py --remove <paper-id>
 
 # Use a custom database path
-python search.py --db /path/to/papers.db "query"
+./.venv/bin/python search.py --db /path/to/papers.db "query"
 ```
 
 ## Running tests
 
 ```bash
-pip install pytest
-pytest test_search.py -v
+./.venv/bin/python test_search.py -v
 ```
 
 ## Project structure
