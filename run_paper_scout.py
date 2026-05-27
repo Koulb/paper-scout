@@ -25,7 +25,9 @@ from paper_scout.database import (
     record_recommendation_run,
     recommendation_history_count,
     save_paper,
+    update_paper_metrics,
 )
+from paper_scout.semantic_scholar import fetch_paper_metrics, fetch_top_hindex
 from paper_scout.scholar_search import search_scholar
 from paper_scout.slack_post import post_report
 
@@ -59,6 +61,7 @@ KEYWORD_GROUPS: list[tuple[str, tuple[str, ...], float]] = [
     ("science", ("scientific discovery", "ai for science", "science automation", "research workflow", "tool use", "tool-use", "laboratory", "lab automation", "experiment"), 1.5),
     ("materials", ("materials science", "materials discovery", "material property", "materials", "material", "perovskite", "alloy", "catalyst", "battery", "semiconductor"), 2.0),
     ("compmats", ("computational materials", "electronic structure", "density functional theory", " dft", "workflow", "simulation", "hpc", "atomistic"), 2.0),
+    ("agent_arch", ("model context protocol", " mcp ", "composable", "skill-based", "tool registry", "agent harness", "reusable tool", "plugin"), 0.0),  # tracked for bonus; weight=0 here
     ("planning", ("planning", "planner", "orchestration", "tool execution", "toolchain"), 1.0),
     ("robotics", ("robot", "robotic", "synthesis"), 1.0),
 ]
@@ -121,6 +124,8 @@ class Candidate:
     conclusion_excerpt: str = ""
     notes: list[str] = field(default_factory=list)
     repeat_recommendation: bool = False
+    citations: int | None = None
+    top_author_hindex: int | None = None
 
 
 @dataclass
@@ -204,7 +209,8 @@ def fetch_candidates(
 ) -> list[Candidate]:
     exclude_ids = exclude_ids or set()
     query = """
-        SELECT p.id, p.title, p.authors, p.year, p.abstract, p.url, p.journal, p.created_at
+        SELECT p.id, p.title, p.authors, p.year, p.abstract, p.url, p.journal,
+               p.created_at, p.citations, p.top_author_hindex
         FROM papers p
         WHERE p.year >= ?
     """
@@ -241,6 +247,8 @@ def fetch_candidates(
                 journal=row["journal"] or "",
                 created_at=row["created_at"] or "",
                 new_today=new_today,
+                citations=row["citations"],
+                top_author_hindex=row["top_author_hindex"],
             )
         )
     return candidates
@@ -267,6 +275,9 @@ def score_candidate(candidate: Candidate) -> Candidate:
         score += 1.0
     if "materials science" in text or "computational materials science" in text:
         score += 1.5
+    # Bonus for papers proposing agent architecture patterns (skills/MCP/composable tools)
+    if flags.get("agent_arch") and flags.get("agentic"):
+        score += 1.0
     if any(term in text for term in NEGATIVE_TERMS):
         score -= 3.0
     if "survey" in text or "review" in text:
@@ -330,6 +341,38 @@ def priority_key(candidate: Candidate) -> tuple[float, int, int, str]:
         bonus += 0.3
     if "survey" in text or "review" in text:
         bonus -= 0.5
+
+    # Journal / venue prestige
+    venue = f"{candidate.journal or ''} {candidate.url}".lower()
+    if any(s in venue for s in ("nature.com", "nature materials", "nature chemistry",
+                                 "nature computational", "npj computational", "npj comput")):
+        bonus += 1.5
+    elif any(s in venue for s in ("science.org", "sciencemag", "science advances",
+                                   "physical review letters", "journals.aps.org/prl",
+                                   "pubs.acs.org", "jacs", "acs nano", "chemrxiv")):
+        bonus += 1.0
+    elif any(s in venue for s in ("neurips", "icml", "iclr", "cvpr", "aaai",
+                                   "openreview.net")):
+        bonus += 0.8
+
+    # Citation count (rewards established, well-cited work)
+    if candidate.citations is not None:
+        if candidate.citations >= 500:
+            bonus += 1.5
+        elif candidate.citations >= 100:
+            bonus += 0.8
+        elif candidate.citations >= 30:
+            bonus += 0.3
+
+    # Senior author h-index (last 3 authors = typically PIs / group leaders)
+    if candidate.top_author_hindex is not None:
+        if candidate.top_author_hindex >= 80:
+            bonus += 1.5
+        elif candidate.top_author_hindex >= 50:
+            bonus += 1.0
+        elif candidate.top_author_hindex >= 30:
+            bonus += 0.5
+
     return (candidate.score + bonus, candidate.year or 0, 1 if candidate.new_today else 0, candidate.title.lower())
 
 
@@ -504,7 +547,13 @@ def build_why_read(candidate: Candidate) -> str:
     return "High-signal paper for the current Track A/B priorities. It looks materially closer to usable scientific automation than generic AI-for-science filler."
 
 
-def enrich_candidates(candidates: list[Candidate], *, deep_dive_limit: int, deep_dive_budget_sec: int) -> None:
+def enrich_candidates(
+    candidates: list[Candidate],
+    *,
+    deep_dive_limit: int,
+    deep_dive_budget_sec: int,
+    conn=None,
+) -> None:
     deadline = time.monotonic() + deep_dive_budget_sec
     shortlist = sorted(candidates, key=priority_key, reverse=True)[:deep_dive_limit]
     for candidate in shortlist:
@@ -520,6 +569,24 @@ def enrich_candidates(candidates: list[Candidate], *, deep_dive_limit: int, deep
         source_text = conclusion or abstract or candidate.abstract or candidate.title
         candidate.takeaway = select_takeaway(source_text)
         candidate.why_read = build_why_read(candidate)
+
+        # Fetch Semantic Scholar metrics only when not already cached in DB
+        if candidate.citations is None and candidate.top_author_hindex is None:
+            if time.monotonic() < deadline:
+                try:
+                    metrics = fetch_paper_metrics(candidate.id, candidate.title)
+                    candidate.citations = metrics["citations"]
+                    if metrics["s2_authors"]:
+                        candidate.top_author_hindex = fetch_top_hindex(metrics["s2_authors"])
+                    if conn is not None:
+                        update_paper_metrics(
+                            conn,
+                            candidate.id,
+                            citations=candidate.citations,
+                            top_author_hindex=candidate.top_author_hindex,
+                        )
+                except Exception as exc:
+                    candidate.notes.append(f"s2 fetch failed: {exc}")
 
     for candidate in candidates:
         if not candidate.why_read:
@@ -837,6 +904,7 @@ def main() -> int:
             deep_dive_pool,
             deep_dive_limit=args.deep_dive_limit,
             deep_dive_budget_sec=args.deep_dive_budget_sec,
+            conn=conn,
         )
 
         enriched_map = {candidate.id: candidate for candidate in deep_dive_pool}

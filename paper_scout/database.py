@@ -35,6 +35,9 @@ def _ensure_schema(conn: sqlite3.Connection):
             arxiv_id TEXT,
             journal TEXT,
             title_hash TEXT,
+            citations INTEGER,
+            top_author_hindex INTEGER,
+            s2_fetched_at TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -77,6 +80,17 @@ def _ensure_schema(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_recommendation_history_paper_id ON recommendation_history(paper_id);
         CREATE INDEX IF NOT EXISTS idx_recommendation_history_recommended_at ON recommendation_history(recommended_at DESC);
     """)
+    # Idempotent column migrations for DBs created before these columns existed
+    for col_def in [
+        "ALTER TABLE papers ADD COLUMN citations INTEGER",
+        "ALTER TABLE papers ADD COLUMN top_author_hindex INTEGER",
+        "ALTER TABLE papers ADD COLUMN s2_fetched_at TEXT",
+    ]:
+        try:
+            conn.execute(col_def)
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.commit()
 
 
 def count_papers(conn: sqlite3.Connection) -> dict:
@@ -152,6 +166,21 @@ def save_paper(conn: sqlite3.Connection, paper: dict) -> bool:
     )
     conn.commit()
     return True
+
+
+def update_paper_metrics(
+    conn: sqlite3.Connection,
+    paper_id: str,
+    *,
+    citations: int | None,
+    top_author_hindex: int | None,
+) -> None:
+    """Persist Semantic Scholar metrics so they survive across runs."""
+    conn.execute(
+        "UPDATE papers SET citations=?, top_author_hindex=?, s2_fetched_at=? WHERE id=?",
+        (citations, top_author_hindex, datetime.now().isoformat(), paper_id),
+    )
+    conn.commit()
 
 
 def remove_paper(conn: sqlite3.Connection, paper_id: str) -> bool:
