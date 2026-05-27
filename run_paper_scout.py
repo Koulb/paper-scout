@@ -77,6 +77,7 @@ NEGATIVE_TERMS = (
     "education",
     "behavioral science",
     "climate",
+    "racing",
 )
 
 TAKEAWAY_HINTS = (
