@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON="$ROOT/.venv/bin/python"
+SCRIPT="$ROOT/run_paper_scout.py"
+
+if [ "$#" -eq 0 ]; then
+  set -- --min-year 2024 --search-minutes 9 --report-out "$ROOT/analysis/latest_report.md"
+fi
+
+exec "$PYTHON" "$SCRIPT" "$@"

@@ -1,3 +1,5 @@
 arxiv
 scholarly
 pytest
+requests
+beautifulsoup4

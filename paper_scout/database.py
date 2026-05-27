@@ -3,6 +3,8 @@
 import os
 import sqlite3
 from datetime import datetime
+from typing import Any, Iterable
+
 from paper_scout.normalize import compute_title_hash
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -14,6 +16,7 @@ def get_connection(db_path: str | None = None) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     _ensure_schema(conn)
     return conn
 
@@ -47,6 +50,32 @@ def _ensure_schema(conn: sqlite3.Connection):
             evaluated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS recommendation_runs (
+            run_id TEXT PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            fresh_since TEXT,
+            min_year INTEGER,
+            report_count INTEGER NOT NULL,
+            top_count INTEGER NOT NULL,
+            search_minutes REAL NOT NULL,
+            skip_search INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS recommendation_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            paper_id TEXT NOT NULL,
+            rank INTEGER NOT NULL,
+            was_fresh INTEGER NOT NULL DEFAULT 0,
+            score INTEGER,
+            recommended_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES recommendation_runs(run_id) ON DELETE CASCADE,
+            FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE,
+            UNIQUE (run_id, paper_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_papers_title_hash ON papers(title_hash);
+        CREATE INDEX IF NOT EXISTS idx_recommendation_history_paper_id ON recommendation_history(paper_id);
+        CREATE INDEX IF NOT EXISTS idx_recommendation_history_recommended_at ON recommendation_history(recommended_at DESC);
     """)
 
 
@@ -130,3 +159,87 @@ def remove_paper(conn: sqlite3.Connection, paper_id: str) -> bool:
     cursor = conn.execute("DELETE FROM papers WHERE id = ?", (paper_id,))
     conn.commit()
     return cursor.rowcount > 0
+
+
+def recommendation_history_count(conn: sqlite3.Connection) -> int:
+    """Return how many recommendation-history rows exist."""
+    return conn.execute("SELECT COUNT(*) FROM recommendation_history").fetchone()[0]
+
+
+def get_last_recommendation_at(conn: sqlite3.Connection) -> str | None:
+    """Return the completion timestamp of the most recent successful recommendation run."""
+    row = conn.execute(
+        "SELECT completed_at FROM recommendation_runs ORDER BY completed_at DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        return None
+    return row["completed_at"]
+
+
+def _paper_value(paper: Any, key: str, default=None):
+    if isinstance(paper, dict):
+        return paper.get(key, default)
+    return getattr(paper, key, default)
+
+
+def record_recommendation_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    started_at: str,
+    completed_at: str,
+    fresh_since: str | None,
+    min_year: int,
+    report_count: int,
+    top_count: int,
+    search_minutes: float,
+    skip_search: bool,
+    papers: Iterable[Any],
+) -> None:
+    """Persist a successful recommendation run and the papers it surfaced."""
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO recommendation_runs
+        (run_id, started_at, completed_at, fresh_since, min_year, report_count, top_count, search_minutes, skip_search)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            started_at,
+            completed_at,
+            fresh_since,
+            min_year,
+            report_count,
+            top_count,
+            search_minutes,
+            1 if skip_search else 0,
+        ),
+    )
+
+    rows = []
+    for rank, paper in enumerate(papers, 1):
+        paper_id = _paper_value(paper, "id")
+        if not paper_id:
+            continue
+        rows.append(
+            (
+                run_id,
+                paper_id,
+                rank,
+                1 if _paper_value(paper, "new_today", False) else 0,
+                _paper_value(paper, "score"),
+                completed_at,
+            )
+        )
+
+    if rows:
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO recommendation_history
+            (run_id, paper_id, rank, was_fresh, score, recommended_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+    conn.commit()

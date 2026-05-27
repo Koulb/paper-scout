@@ -47,14 +47,35 @@ def cmd_remove(conn, paper_id: str):
         print(f"No paper found with ID: {paper_id}")
 
 
-def cmd_search(conn, query: str, num_results: int = 5):
+def paper_year_meets_minimum(paper: dict, min_year: int | None = None) -> bool:
+    """Return True when a paper meets the minimum-year persistence filter."""
+    if min_year is None:
+        return True
+
+    raw_year = paper.get("year")
+    if raw_year is None:
+        return False
+
+    try:
+        year = int(str(raw_year).strip())
+    except (TypeError, ValueError):
+        return False
+
+    return year >= min_year
+
+
+def cmd_search(conn, query: str, num_results: int = 5, min_year: int | None = None):
     """Search Google Scholar and arXiv, save new papers to the database."""
     added = 0
+    skipped_by_year = 0
 
     print(f"Searching Google Scholar for: {query}")
     try:
         gs_papers = search_scholar(query, num_results=num_results)
         for p in gs_papers:
+            if not paper_year_meets_minimum(p, min_year=min_year):
+                skipped_by_year += 1
+                continue
             if save_paper(conn, p):
                 added += 1
                 print(f"  + [{p.get('year', '?')}] {p['title'][:80]}")
@@ -65,6 +86,9 @@ def cmd_search(conn, query: str, num_results: int = 5):
     try:
         arxiv_papers = search_arxiv(query, max_results=num_results)
         for p in arxiv_papers:
+            if not paper_year_meets_minimum(p, min_year=min_year):
+                skipped_by_year += 1
+                continue
             if save_paper(conn, p):
                 added += 1
                 print(f"  + [{p.get('year', '?')}] {p['title'][:80]}")
@@ -72,6 +96,8 @@ def cmd_search(conn, query: str, num_results: int = 5):
         print(f"  arXiv error: {e}")
 
     counts = count_papers(conn)
+    if min_year is not None:
+        print(f"\nSkipped {skipped_by_year} papers older than {min_year} or missing a usable year.")
     print(f"\nAdded {added} new papers. Database now has {counts['total']} papers.")
     return added
 
@@ -97,6 +123,10 @@ def main():
         "--db", default=None,
         help="Path to SQLite database (default: data/papers.db)",
     )
+    parser.add_argument(
+        "--min-year", type=int, default=None,
+        help="Only persist papers published in or after this year",
+    )
 
     args = parser.parse_args()
     conn = get_connection(args.db)
@@ -107,7 +137,7 @@ def main():
         cmd_inspect(conn)
     elif args.query:
         query = " ".join(args.query)
-        cmd_search(conn, query, num_results=args.num_results)
+        cmd_search(conn, query, num_results=args.num_results, min_year=args.min_year)
     else:
         cmd_stats(conn)
 

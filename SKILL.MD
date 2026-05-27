@@ -80,6 +80,20 @@ paper-scout/
 
 Before doing topic-specific search/ranking/filtering work, check the latest instructions in the *paper-club* chat. If those instructions conflict with this file, the chat wins.
 
+For the full daily recommendation workflow, prefer the single-driver command instead of lots of ad hoc tool calls:
+
+```bash
+./.venv/bin/python run_paper_scout.py --min-year 2024 --search-minutes 9 --report-out analysis/latest_report.md
+```
+
+To also post the report to Slack after the run, add `--post-slack`:
+
+```bash
+./.venv/bin/python run_paper_scout.py --min-year 2024 --search-minutes 9 --report-out analysis/latest_report.md --post-slack
+```
+
+Slack credentials are read from `.env` in the repo root (`SLACK_BOT_TOKEN` and `SLACK_CHANNEL`). The bot has write-only access to `#paper-club`.
+
 To find papers on a topic, run:
 
 ```bash

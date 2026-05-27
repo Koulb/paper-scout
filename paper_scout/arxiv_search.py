@@ -1,5 +1,25 @@
 """Search arXiv for papers."""
 
+from __future__ import annotations
+
+import time
+
+
+ARXIV_MIN_INTERVAL_SEC = 3.5
+_last_arxiv_request_started_at = 0.0
+
+
+def _throttle_arxiv_requests() -> None:
+    """Respect arXiv's low-rate API expectations across sequential queries."""
+    global _last_arxiv_request_started_at
+
+    now = time.monotonic()
+    wait_for = ARXIV_MIN_INTERVAL_SEC - (now - _last_arxiv_request_started_at)
+    if wait_for > 0:
+        time.sleep(wait_for)
+        now = time.monotonic()
+    _last_arxiv_request_started_at = now
+
 
 def search_arxiv(query: str, max_results: int = 5) -> list[dict]:
     """Search papers on arXiv.
@@ -13,7 +33,7 @@ def search_arxiv(query: str, max_results: int = 5) -> list[dict]:
             "Missing dependency 'arxiv'. Install with: pip install arxiv"
         ) from exc
 
-    client = Client()
+    client = Client(page_size=max_results, delay_seconds=ARXIV_MIN_INTERVAL_SEC, num_retries=3)
     search = Search(
         query=query,
         max_results=max_results,
@@ -23,6 +43,7 @@ def search_arxiv(query: str, max_results: int = 5) -> list[dict]:
 
     results = []
     try:
+        _throttle_arxiv_requests()
         for paper in client.results(search):
             year = None
             if paper.published:
