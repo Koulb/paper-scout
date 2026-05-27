@@ -21,10 +21,11 @@ def _throttle_arxiv_requests() -> None:
     _last_arxiv_request_started_at = now
 
 
-def search_arxiv(query: str, max_results: int = 5) -> list[dict]:
+def search_arxiv(query: str, max_results: int = 5, sort_by: str = "relevance") -> list[dict]:
     """Search papers on arXiv.
 
     Returns a list of dicts with keys: title, authors, year, abstract, url, arxiv_id.
+    sort_by: "relevance" (default) or "date" (SubmittedDate descending).
     """
     try:
         from arxiv import Client, Search, SortCriterion, SortOrder
@@ -33,11 +34,12 @@ def search_arxiv(query: str, max_results: int = 5) -> list[dict]:
             "Missing dependency 'arxiv'. Install with: pip install arxiv"
         ) from exc
 
+    sort_criterion = SortCriterion.SubmittedDate if sort_by == "date" else SortCriterion.Relevance
     client = Client(page_size=max_results, delay_seconds=ARXIV_MIN_INTERVAL_SEC, num_retries=3)
     search = Search(
         query=query,
         max_results=max_results,
-        sort_by=SortCriterion.Relevance,
+        sort_by=sort_criterion,
         sort_order=SortOrder.Descending,
     )
 

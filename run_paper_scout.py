@@ -45,6 +45,12 @@ QUERY_FAMILIES = [
     {"track": "A", "query": "exchange-correlation functional discovery"},
     {"track": "A", "query": "agentic DFT workflow materials discovery"},
     {"track": "A", "query": "materials discovery multi-agent simulation workflow"},
+    # Category-scoped arXiv browsing — date-sorted to catch fresh papers; arxiv only
+    {"track": "A", "query": 'cat:cond-mat.mtrl-sci AND (agent OR autonomous OR agentic OR "large language model")', "providers": ["arxiv"], "sort_by": "date"},
+    {"track": "A", "query": 'cat:cond-mat.mes-hall AND (agent OR autonomous OR agentic OR "large language model")', "providers": ["arxiv"], "sort_by": "date"},
+    {"track": "A", "query": 'cat:physics.chem-ph AND (agent OR autonomous OR agentic OR "large language model")', "providers": ["arxiv"], "sort_by": "date"},
+    {"track": "A", "query": 'cat:cs.LG AND (materials OR "density functional" OR atomistic OR "computational chemistry")', "providers": ["arxiv"], "sort_by": "date"},
+    {"track": "A", "query": 'cat:cs.AI AND (materials OR "density functional" OR atomistic OR "computational chemistry")', "providers": ["arxiv"], "sort_by": "date"},
 ]
 
 KEYWORD_GROUPS: list[tuple[str, tuple[str, ...], float]] = [
@@ -52,7 +58,7 @@ KEYWORD_GROUPS: list[tuple[str, tuple[str, ...], float]] = [
     ("llm", ("large language model", "large language models", "llm", "multimodal", "foundation model", "foundation models"), 1.5),
     ("science", ("scientific discovery", "ai for science", "science automation", "research workflow", "tool use", "tool-use", "laboratory", "lab automation", "experiment"), 1.5),
     ("materials", ("materials science", "materials discovery", "material property", "materials", "material", "perovskite", "alloy", "catalyst", "battery", "semiconductor"), 2.0),
-    ("compmats", ("computational materials", "electronic structure", "density functional theory", " dft", "workflow", "simulation", "hpc"), 2.0),
+    ("compmats", ("computational materials", "electronic structure", "density functional theory", " dft", "workflow", "simulation", "hpc", "atomistic"), 2.0),
     ("planning", ("planning", "planner", "orchestration", "tool execution", "toolchain"), 1.0),
     ("robotics", ("robot", "robotic", "synthesis"), 1.0),
 ]
@@ -169,9 +175,9 @@ def paper_year_meets_minimum(paper: dict, min_year: int | None = None) -> bool:
     return year >= min_year
 
 
-def run_provider_query(*, conn, query: str, provider: str, num_results: int, min_year: int | None) -> tuple[int, int]:
+def run_provider_query(*, conn, query: str, provider: str, num_results: int, min_year: int | None, sort_by: str = "relevance") -> tuple[int, int]:
     if provider == "arxiv":
-        papers = search_arxiv(query, max_results=num_results)
+        papers = search_arxiv(query, max_results=num_results, sort_by=sort_by)
     elif provider == "scholar":
         papers = search_scholar(query, num_results=num_results)
     else:
@@ -675,7 +681,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run the daily Paper Scout recommendation workflow.")
     parser.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to SQLite database")
     parser.add_argument("--min-year", type=int, default=2024, help="Minimum publication year to persist/use")
-    parser.add_argument("--num-results", type=int, default=4, help="Results per provider per query")
+    parser.add_argument("--num-results", type=int, default=50, help="Results per provider per query")
     parser.add_argument("--search-minutes", type=float, default=9.0, help="Hard budget for search phase")
     parser.add_argument("--deep-dive-limit", type=int, default=15, help="How many papers to enrich in phase 2")
     parser.add_argument("--deep-dive-budget-sec", type=int, default=240, help="Hard budget for abstract/conclusion fetching")
@@ -711,7 +717,7 @@ def main() -> int:
                 if time.monotonic() >= deadline:
                     early_stop = True
                     break
-                for provider in ("arxiv", "scholar"):
+                for provider in item.get("providers", ["arxiv", "scholar"]):
                     if time.monotonic() >= deadline:
                         early_stop = True
                         break
@@ -726,6 +732,7 @@ def main() -> int:
                             provider=provider,
                             num_results=args.num_results,
                             min_year=args.min_year,
+                            sort_by=item.get("sort_by", "relevance"),
                         )
                     except Exception as exc:
                         error = str(exc)
