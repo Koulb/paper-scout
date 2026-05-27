@@ -295,16 +295,41 @@ def score_candidate(candidate: Candidate) -> Candidate:
 def priority_key(candidate: Candidate) -> tuple[float, int, int, str]:
     bonus = 0.0
     text = f"{candidate.title} {candidate.abstract}".lower()
-    if candidate.new_today:
-        bonus += 0.3
-    if "materials" in text:
-        bonus += 0.4
-    if "dft" in text or "density functional theory" in text:
+    title_lower = candidate.title.lower()
+
+    is_agentic = any(t in text for t in ("agent", "agentic", "autonomous", "multi-agent"))
+    title_agentic = any(t in title_lower for t in ("agent", "agentic", "autonomous", "multi-agent"))
+    has_dft = "dft" in text or "density functional" in text
+    title_dft = "dft" in title_lower or "density functional" in title_lower
+    has_atomistic = "atomistic" in text
+    title_atomistic = "atomistic" in title_lower
+    has_materials = "materials" in text or "material" in text
+
+    # Tier 1: DFT or atomistic in the *title* + agent anywhere — direct on-target papers
+    if title_dft and is_agentic:
+        bonus += 3.0
+    elif title_atomistic and is_agentic:
+        bonus += 2.5
+    # Tier 2: DFT/atomistic only in abstract + agent
+    elif has_dft and is_agentic:
+        bonus += 1.5
+    elif has_atomistic and is_agentic:
+        bonus += 1.2
+    elif has_dft:
+        bonus += 0.5
+
+    # Extra credit for agent/autonomous appearing in the title itself
+    if title_agentic:
+        bonus += 0.5
+
+    if has_materials and is_agentic:
         bonus += 0.3
     if "robot" in text or "laboratory" in text:
-        bonus += 0.2
-    if "survey" in text:
-        bonus -= 0.2
+        bonus += 0.3
+    if candidate.new_today:
+        bonus += 0.3
+    if "survey" in text or "review" in text:
+        bonus -= 0.5
     return (candidate.score + bonus, candidate.year or 0, 1 if candidate.new_today else 0, candidate.title.lower())
 
 
@@ -604,7 +629,7 @@ def render_slack_report(
             suffix = " _(repeat)_"
         elif not c.new_today:
             suffix = " _(DB backfill)_"
-        lines.append(f"{i}. *{c.title}* — {desc} {track_tag}{suffix}".rstrip())
+        lines.append(f"{i}. *<{c.url}|{c.title}>* — {desc} {track_tag}{suffix}".rstrip())
 
     lines += ["", "---", "", ":fire: *Top 3 Must-Read Today*", ""]
     for i, c in enumerate(top_three, 1):
