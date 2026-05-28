@@ -22,6 +22,8 @@ from paper_scout.arxiv_search import search_arxiv
 from paper_scout.database import (
     get_connection,
     get_last_recommendation_at,
+    get_posted_paper_ids,
+    mark_papers_posted,
     record_recommendation_run,
     recommendation_history_count,
     save_paper,
@@ -29,7 +31,7 @@ from paper_scout.database import (
 )
 from paper_scout.semantic_scholar import fetch_paper_metrics, fetch_top_hindex
 from paper_scout.scholar_search import search_scholar
-from paper_scout.slack_post import post_report
+from paper_scout.slack_post import post_report, sync_posted_papers
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = ROOT / "data" / "papers.db"
@@ -207,6 +209,7 @@ def fetch_candidates(
     created_since: datetime | None = None,
     exclude_ids: set[str] | None = None,
     exclude_recommended: bool = False,
+    exclude_posted: bool = True,
 ) -> list[Candidate]:
     exclude_ids = exclude_ids or set()
     query = """
@@ -215,6 +218,8 @@ def fetch_candidates(
         FROM papers p
         WHERE p.year >= ?
     """
+    if exclude_posted:
+        query += " AND p.posted_at IS NULL\n"
     if exclude_recommended:
         query += """
         AND NOT EXISTS (
@@ -774,7 +779,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run the daily Paper Scout recommendation workflow.")
     parser.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to SQLite database")
     parser.add_argument("--min-year", type=int, default=2024, help="Minimum publication year to persist/use")
-    parser.add_argument("--num-results", type=int, default=50, help="Results per provider per query")
+    parser.add_argument("--num-results", type=int, default=400, help="Results per provider per query")
     parser.add_argument("--search-minutes", type=float, default=9.0, help="Hard budget for search phase")
     parser.add_argument("--deep-dive-limit", type=int, default=15, help="How many papers to enrich in phase 2")
     parser.add_argument("--deep-dive-budget-sec", type=int, default=240, help="Hard budget for abstract/conclusion fetching")
@@ -797,6 +802,13 @@ def main() -> int:
         conn,
         analysis_dir / "latest_recommendation.json",
     )
+    # Sync Slack channel history so papers already shown are excluded from ranking
+    try:
+        n_synced = sync_posted_papers(conn)
+        if n_synced:
+            sys.stderr.write(f"Marked {n_synced} previously-posted papers in DB.\n")
+    except Exception as exc:
+        sys.stderr.write(f"Slack sync warning (non-fatal): {exc}\n")
     explicit_fresh_since = parse_timestamp(args.fresh_since)
     last_recommendation_at = parse_timestamp(get_last_recommendation_at(conn))
     fresh_since = explicit_fresh_since or last_recommendation_at or run_started_at
@@ -975,6 +987,7 @@ def main() -> int:
             )
             post_report(slack_report)
             sys.stderr.write("Report posted to Slack.\n")
+            mark_papers_posted(conn, [c.id for c in report_candidates])
 
         return 0
     finally:

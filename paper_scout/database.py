@@ -85,6 +85,7 @@ def _ensure_schema(conn: sqlite3.Connection):
         "ALTER TABLE papers ADD COLUMN citations INTEGER",
         "ALTER TABLE papers ADD COLUMN top_author_hindex INTEGER",
         "ALTER TABLE papers ADD COLUMN s2_fetched_at TEXT",
+        "ALTER TABLE papers ADD COLUMN posted_at TEXT",
     ]:
         try:
             conn.execute(col_def)
@@ -181,6 +182,47 @@ def update_paper_metrics(
         (citations, top_author_hindex, datetime.now().isoformat(), paper_id),
     )
     conn.commit()
+
+
+def mark_papers_posted(conn: sqlite3.Connection, paper_ids: list[str]) -> None:
+    """Stamp posted_at on papers that were just sent to Slack."""
+    now = datetime.now().isoformat()
+    conn.executemany(
+        "UPDATE papers SET posted_at = ? WHERE id = ? AND posted_at IS NULL",
+        [(now, pid) for pid in paper_ids],
+    )
+    conn.commit()
+
+
+def get_posted_paper_ids(conn: sqlite3.Connection) -> set[str]:
+    """Return IDs of all papers that have been posted to Slack."""
+    rows = conn.execute("SELECT id FROM papers WHERE posted_at IS NOT NULL").fetchall()
+    return {row["id"] for row in rows}
+
+
+def get_posted_urls(conn: sqlite3.Connection) -> set[str]:
+    """Return URLs of all papers that have been posted to Slack."""
+    rows = conn.execute("SELECT url FROM papers WHERE posted_at IS NOT NULL AND url != ''").fetchall()
+    return {row["url"] for row in rows}
+
+
+def mark_posted_by_urls(conn: sqlite3.Connection, urls: set[str]) -> int:
+    """Mark papers as posted by matching their stored URL against a set of canonical URLs.
+
+    Returns number of rows updated.
+    """
+    if not urls:
+        return 0
+    now = datetime.now().isoformat()
+    updated = 0
+    for url in urls:
+        cursor = conn.execute(
+            "UPDATE papers SET posted_at = ? WHERE url = ? AND posted_at IS NULL",
+            (now, url),
+        )
+        updated += cursor.rowcount
+    conn.commit()
+    return updated
 
 
 def remove_paper(conn: sqlite3.Connection, paper_id: str) -> bool:

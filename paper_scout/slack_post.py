@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 
@@ -46,3 +48,102 @@ def post_report(report: str, *, token: str | None = None, channel: str | None = 
         result = json.loads(resp.read())
     if not result.get("ok"):
         raise RuntimeError(f"Slack post failed: {result.get('error', 'unknown')}")
+
+
+def _resolve_channel_id(token: str, channel_name: str) -> str | None:
+    """Resolve a channel name like 'paper-club' to its Slack channel ID."""
+    url = "https://slack.com/api/conversations.list?limit=200&types=public_channel,private_channel"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read())
+    if not data.get("ok"):
+        return None
+    name = channel_name.lstrip("#")
+    for ch in data.get("channels", []):
+        if ch.get("name") == name:
+            return ch["id"]
+    return None
+
+
+def _normalize_url(url: str) -> str:
+    """Strip Slack mrkdwn decoration and version suffixes for comparison."""
+    # Slack wraps links as <url|text> or <url> — strip angle brackets and label
+    url = re.sub(r"[<>]", "", url)
+    url = url.split("|")[0].strip()
+    # Normalize arxiv: strip version suffix and trailing slashes
+    url = re.sub(r"(arxiv\.org/abs/[\d.]+)v\d+", r"\1", url)
+    url = url.rstrip("/")
+    # Normalize http vs https
+    url = url.replace("http://arxiv.org", "https://arxiv.org")
+    return url
+
+
+def fetch_posted_urls(*, token: str | None = None, channel: str | None = None) -> set[str]:
+    """Return the set of canonical paper URLs that have been posted to the Slack channel."""
+    _load_dotenv()
+    token = token or os.environ.get("SLACK_BOT_TOKEN")
+    channel = channel or os.environ.get("SLACK_CHANNEL")
+    if not token or not channel:
+        return set()
+
+    # Resolve name → ID if needed
+    channel_id = channel if channel.startswith("C") else _resolve_channel_id(token, channel)
+    if not channel_id:
+        return set()
+
+    posted: set[str] = set()
+    cursor = None
+    while True:
+        params = f"channel={channel_id}&limit=200"
+        if cursor:
+            params += f"&cursor={urllib.parse.quote(cursor)}"
+        req = urllib.request.Request(
+            f"https://slack.com/api/conversations.history?{params}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+        if not data.get("ok"):
+            break
+        for msg in data.get("messages", []):
+            text = msg.get("text", "")
+            # Extract all URLs from Slack mrkdwn <url|label> and plain text
+            for raw in re.findall(r"<(https?://[^>|]+)[|>]", text):
+                posted.add(_normalize_url(raw))
+            for raw in re.findall(r"(?<![<|])(https?://\S+?)(?:[>\s]|$)", text):
+                posted.add(_normalize_url(raw))
+        next_cursor = data.get("response_metadata", {}).get("next_cursor", "")
+        if not next_cursor:
+            break
+        cursor = next_cursor
+
+    return posted
+
+
+def sync_posted_papers(conn, *, token: str | None = None, channel: str | None = None) -> int:
+    """Read Slack channel history and mark matching DB papers as posted.
+
+    Returns the number of papers newly marked.
+    """
+    from paper_scout.database import mark_posted_by_urls
+
+    slack_urls = fetch_posted_urls(token=token, channel=channel)
+    if not slack_urls:
+        return 0
+
+    # Also build normalized versions of all DB paper URLs for matching
+    rows = conn.execute(
+        "SELECT id, url FROM papers WHERE url != '' AND posted_at IS NULL"
+    ).fetchall()
+
+    now = __import__("datetime").datetime.now().isoformat()
+    updated = 0
+    for row in rows:
+        db_url = _normalize_url(row["url"])
+        if db_url in slack_urls:
+            conn.execute(
+                "UPDATE papers SET posted_at = ? WHERE id = ?", (now, row["id"])
+            )
+            updated += 1
+    conn.commit()
+    return updated
