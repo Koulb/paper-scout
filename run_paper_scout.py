@@ -3,6 +3,11 @@
 
 from __future__ import annotations
 
+# Scoring constants
+PRIORITY_SCORE_MAX = 13.8   # empirical max; all raw priority scores are normalized to 0–10
+PRIMARY_THRESHOLD = 8.0     # normalized threshold; fall back to FALLBACK_THRESHOLD when pool runs dry
+FALLBACK_THRESHOLD = 7.0    # used when fewer than report_count papers pass PRIMARY_THRESHOLD
+
 import argparse
 import json
 import re
@@ -129,6 +134,7 @@ class Candidate:
     repeat_recommendation: bool = False
     citations: int | None = None
     top_author_hindex: int | None = None
+    normalized_priority: float = 0.0
 
 
 @dataclass
@@ -309,6 +315,12 @@ def score_candidate(candidate: Candidate) -> Candidate:
     return candidate
 
 
+def normalize_priority(candidate: Candidate) -> float:
+    """Return the full priority score (base + bonuses) rescaled to 0–10."""
+    raw = priority_key(candidate)[0]
+    return round(raw * 10.0 / PRIORITY_SCORE_MAX, 2)
+
+
 def priority_key(candidate: Candidate) -> tuple[float, int, int, str]:
     bonus = 0.0
     text = f"{candidate.title} {candidate.abstract}".lower()
@@ -391,31 +403,35 @@ def build_status_line(
     compmats_hits = sum(
         1
         for candidate in fresh_candidates
-        if candidate.score >= 7 and ("materials" in candidate.title.lower() or "dft" in candidate.title.lower() or "computational materials" in f"{candidate.title} {candidate.abstract}".lower())
+        if candidate.normalized_priority >= PRIMARY_THRESHOLD and (
+            "materials" in candidate.title.lower() or "dft" in candidate.title.lower()
+            or "computational materials" in f"{candidate.title} {candidate.abstract}".lower()
+        )
     )
     lane_text = (
         "Computational-materials-agents lane returned relevant candidates."
         if compmats_hits
         else "Computational-materials-agents lane looked weak today."
     )
+    n = len(report_candidates)
     if not report_candidates:
-        return f"{lane_text} No 2024+ papers cleared 7/10 today, even after checking existing DB backfill."
+        return f"{lane_text} No papers cleared the threshold today, even after checking existing DB backfill."
     if repeat_backfill_count and unseen_backfill_count:
         return (
             f"{lane_text} Fresh hits were thin, so {unseen_backfill_count} existing-DB backfill papers and "
-            f"{repeat_backfill_count} previously recommended DB papers were used. {len(report_candidates)} papers cleared 7/10."
+            f"{repeat_backfill_count} previously recommended DB papers were used. {n} papers in report."
         )
     if repeat_backfill_count:
         return (
             f"{lane_text} Fresh hits were exhausted, so {repeat_backfill_count} previously recommended DB papers were reused "
-            f"to keep the report populated. {len(report_candidates)} papers cleared 7/10."
+            f"to keep the report populated. {n} papers in report."
         )
     if unseen_backfill_count:
         return (
-            f"{lane_text} Fresh hits were thin, so #{len(report_candidates) - unseen_backfill_count + 1}-{len(report_candidates)} are "
-            f"existing-DB backfill from 2024+ papers not seen today. {len(report_candidates)} papers cleared 7/10."
+            f"{lane_text} Fresh hits were thin, so #{n - unseen_backfill_count + 1}-{n} are "
+            f"existing-DB backfill from 2024+ papers not seen today. {n} papers in report."
         )
-    return f"{lane_text} {len(report_candidates)} papers cleared 7/10. No backfill needed."
+    return f"{lane_text} {n} papers in report. No backfill needed."
 
 
 def trim_text(text: str, max_chars: int) -> str:
@@ -627,14 +643,14 @@ def render_report(
 
     if repeat_backfill_count:
         lines.append(
-            f"Only {fresh_passing_count} new papers passed 7/10, so existing DB backfill was used, including {repeat_backfill_count} previously recommended papers."
+            f"Only {fresh_passing_count} new papers passed the threshold, so existing DB backfill was used, including {repeat_backfill_count} previously recommended papers."
         )
         lines.append("")
     elif unseen_backfill_count:
-        lines.append(f"Only {fresh_passing_count} new papers passed 7/10, so existing DB backfill was used.")
+        lines.append(f"Only {fresh_passing_count} new papers passed the threshold, so existing DB backfill was used.")
         lines.append("")
     elif len(report_candidates) < 10:
-        lines.append(f"Only {len(report_candidates)} unseen papers passed 7/10 today, so the list is shorter.")
+        lines.append(f"Only {len(report_candidates)} unseen papers passed the threshold today, so the list is shorter.")
         lines.append("")
 
     lines.append("Top 10 worth knowing")
@@ -854,25 +870,39 @@ def main() -> int:
                         )
                     )
 
-        unseen_candidates = [
-            score_candidate(candidate)
-            for candidate in fetch_candidates(
-                conn,
-                min_year=args.min_year,
-                created_since=fresh_since,
-                exclude_recommended=True,
-            )
-        ]
-        fresh_candidates = [candidate for candidate in unseen_candidates if candidate.new_today]
-        existing_candidates = [candidate for candidate in unseen_candidates if not candidate.new_today]
+        def _scored(candidates):
+            result = []
+            for c in candidates:
+                c = score_candidate(c)
+                c.normalized_priority = normalize_priority(c)
+                result.append(c)
+            return result
+
+        unseen_candidates = _scored(fetch_candidates(
+            conn,
+            min_year=args.min_year,
+            created_since=fresh_since,
+            exclude_recommended=True,
+        ))
+        fresh_candidates = [c for c in unseen_candidates if c.new_today]
+        existing_candidates = [c for c in unseen_candidates if not c.new_today]
 
         fresh_ranked = sorted(fresh_candidates, key=priority_key, reverse=True)
-        fresh_passing = [candidate for candidate in fresh_ranked if candidate.score >= 7]
+        existing_ranked = sorted(existing_candidates, key=priority_key, reverse=True)
 
-        unseen_backfill_ranked = [candidate for candidate in sorted(existing_candidates, key=priority_key, reverse=True) if candidate.score >= 7]
+        # Primary tier: normalized priority >= PRIMARY_THRESHOLD (8.0)
+        fresh_passing = [c for c in fresh_ranked if c.normalized_priority >= PRIMARY_THRESHOLD]
+        backfill_primary = [c for c in existing_ranked if c.normalized_priority >= PRIMARY_THRESHOLD]
+        # Fallback tier: >= FALLBACK_THRESHOLD (7.0) but below primary
+        backfill_fallback = [c for c in existing_ranked if FALLBACK_THRESHOLD <= c.normalized_priority < PRIMARY_THRESHOLD]
+
         report_candidates = fresh_passing[: args.report_count]
-        need_unseen_backfill = max(0, args.report_count - len(report_candidates))
-        report_candidates += unseen_backfill_ranked[:need_unseen_backfill]
+        need = max(0, args.report_count - len(report_candidates))
+        report_candidates += backfill_primary[:need]
+        need = max(0, args.report_count - len(report_candidates))
+        report_candidates += backfill_fallback[:need]
+
+        unseen_backfill_ranked = backfill_primary + backfill_fallback
 
         repeat_ranked: list[Candidate] = []
         if len(report_candidates) < args.report_count:
@@ -880,20 +910,17 @@ def main() -> int:
             repeat_ranked = [
                 candidate
                 for candidate in sorted(
-                    (
-                        score_candidate(candidate)
-                        for candidate in fetch_candidates(
-                            conn,
-                            min_year=args.min_year,
-                            created_since=fresh_since,
-                            exclude_ids=selected_ids,
-                            exclude_recommended=False,
-                        )
-                    ),
+                    _scored(fetch_candidates(
+                        conn,
+                        min_year=args.min_year,
+                        created_since=fresh_since,
+                        exclude_ids=selected_ids,
+                        exclude_recommended=False,
+                    )),
                     key=priority_key,
                     reverse=True,
                 )
-                if candidate.score >= 7
+                if candidate.normalized_priority >= FALLBACK_THRESHOLD
             ]
             for candidate in repeat_ranked:
                 candidate.repeat_recommendation = True
