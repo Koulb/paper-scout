@@ -32,11 +32,12 @@ from paper_scout.database import (
     record_recommendation_run,
     recommendation_history_count,
     save_paper,
+    save_paper_slack_ts,
     update_paper_metrics,
 )
 from paper_scout.semantic_scholar import fetch_paper_metrics, fetch_top_hindex
 from paper_scout.scholar_search import search_scholar
-from paper_scout.slack_post import post_report, sync_posted_papers
+from paper_scout.slack_post import collect_feedback, post_message, post_report, sync_posted_papers
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = ROOT / "data" / "papers.db"
@@ -85,6 +86,18 @@ NEGATIVE_TERMS = (
     "behavioral science",
     "climate",
     "racing",
+    "self-driving scene",
+    "lidar",
+    "alpha factor",
+    "financial risk",
+    "geospatial",
+    "order fulfillment",
+    "warehouse",
+    "rna-seq",
+    "rna seq",
+    "single-cell",
+    "genomics",
+    "gene expression",
 )
 
 TAKEAWAY_HINTS = (
@@ -268,7 +281,6 @@ def fetch_candidates(
 
 def score_candidate(candidate: Candidate) -> Candidate:
     text = normalize_space(" ".join([candidate.title, candidate.abstract, candidate.journal, candidate.url])).lower()
-    score = 1.0
     hits: list[str] = []
     flags: dict[str, bool] = {}
 
@@ -277,37 +289,52 @@ def score_candidate(candidate: Candidate) -> Candidate:
         flags[label] = matched
         if matched:
             hits.append(label)
-            score += weight
 
-    if flags.get("agentic") and flags.get("science"):
-        score += 1.5
-    if flags.get("agentic") and flags.get("materials"):
-        score += 1.5
+    # Agent axis: how strongly does the paper engage with AI agents / LLMs?
+    agent_raw = 0.0
+    if flags.get("agentic"):    agent_raw += 2.5
+    if flags.get("llm"):        agent_raw += 1.5
+    if flags.get("science"):    agent_raw += 1.0
+    if flags.get("planning"):   agent_raw += 1.0
+    if flags.get("robotics"):   agent_raw += 0.5
+    if flags.get("agent_arch"): agent_raw += 0.5
+    # Science combo only adds when domain is also present
+    if flags.get("agentic") and flags.get("science") and (flags.get("materials") or flags.get("compmats")):
+        agent_raw += 1.0
+
+    # Domain axis: how strongly is the paper in computational materials science?
+    domain_raw = 0.0
+    if flags.get("materials"):  domain_raw += 2.5
+    if flags.get("compmats"):   domain_raw += 2.5
     if flags.get("materials") and flags.get("compmats"):
-        score += 1.0
+        domain_raw += 1.0
     if "materials science" in text or "computational materials science" in text:
-        score += 1.5
-    # Bonus for papers proposing agent architecture patterns (skills/MCP/composable tools)
-    if flags.get("agent_arch") and flags.get("agentic"):
-        score += 1.0
+        domain_raw += 1.5
+
+    # Penalties on both axes
     if any(term in text for term in NEGATIVE_TERMS):
-        score -= 3.0
+        agent_raw = max(0.0, agent_raw - 3.0)
+        domain_raw = max(0.0, domain_raw - 3.0)
     if "survey" in text or "review" in text:
-        score -= 0.5
+        agent_raw = max(0.0, agent_raw - 0.5)
+
+    # Recency bonus on domain axis
     if candidate.year:
-        if candidate.year >= 2026:
-            score += 0.8
-        elif candidate.year >= 2025:
-            score += 0.5
-        elif candidate.year >= 2024:
-            score += 0.2
+        if candidate.year >= 2026:   domain_raw += 0.8
+        elif candidate.year >= 2025: domain_raw += 0.5
+        elif candidate.year >= 2024: domain_raw += 0.2
 
-    final_score = max(0, min(10, int(round(score))))
+    # Normalize each axis to 0–1
+    _AGENT_MAX = 7.5   # agentic+llm+science+planning+robotics+arch+combo
+    _DOMAIN_MAX = 8.3  # materials+compmats+both_combo+matscience+year
+    a = min(agent_raw / _AGENT_MAX, 1.0)
+    d = min(domain_raw / _DOMAIN_MAX, 1.0)
 
-    if any(flags.get(k) for k in ("agentic", "llm", "science", "materials", "compmats", "planning", "robotics")):
-        track = "A"
-    else:
-        track = "unclear"
+    # Geometric mean × 10: both axes must be strong for a high score;
+    # zero on either axis collapses the score to zero.
+    final_score = max(0, min(10, int(round(10.0 * (a * d) ** 0.5))))
+
+    track = "A" if any(flags.get(k) for k in ("agentic", "llm", "science", "materials", "compmats", "planning", "robotics")) else "unclear"
 
     candidate.score = final_score
     candidate.track = track
@@ -326,8 +353,11 @@ def priority_key(candidate: Candidate) -> tuple[float, int, int, str]:
     text = f"{candidate.title} {candidate.abstract}".lower()
     title_lower = candidate.title.lower()
 
-    is_agentic = any(t in text for t in ("agent", "agentic", "autonomous", "multi-agent"))
-    title_agentic = any(t in title_lower for t in ("agent", "agentic", "autonomous", "multi-agent"))
+    _strong_agent = any(t in text for t in ("agent", "agentic", "multi-agent", "tool use", "tool-use", "self-driving"))
+    _llm_present = "llm" in text or "large language model" in text
+    _llm_action = any(t in text for t in ("agent", "tool", "workflow", "autonomous", "agentic", "orchestrat"))
+    is_agentic = _strong_agent or (_llm_present and _llm_action)
+    title_agentic = any(t in title_lower for t in ("agent", "agentic", "multi-agent", "llm", "self-driving"))
     has_dft = "dft" in text or "density functional" in text
     title_dft = "dft" in title_lower or "density functional" in title_lower
     has_atomistic = "atomistic" in text
@@ -359,6 +389,35 @@ def priority_key(candidate: Candidate) -> tuple[float, int, int, str]:
         bonus += 0.3
     if "survey" in text or "review" in text:
         bonus -= 0.5
+
+    # Domain specificity: reward on-target computational materials papers,
+    # penalize agentic papers with no connection to our domain.
+    has_compmats_signal = (
+        has_dft or has_atomistic or has_materials or
+        "electronic structure" in text or
+        "ab initio" in text or "ab-initio" in text or
+        "force field" in text or "forcefield" in text or
+        "vasp" in text or "quantum espresso" in text or
+        "phonon" in text or "band structure" in text or
+        "computational chemistry" in text or
+        "molecular simulation" in text or
+        "molecular dynamics" in text
+    )
+    has_strong_compmats = (
+        "electronic structure" in text or
+        "ab initio" in text or "ab-initio" in text or
+        "force field" in text or "forcefield" in text or
+        "vasp" in text or "quantum espresso" in text or
+        "phonon" in text or "band structure" in text or
+        "molecular dynamics" in text or
+        "molecular simulation" in text
+    )
+    # Off-domain agentic penalty: agentic but zero computational materials signal
+    if is_agentic and not has_compmats_signal:
+        bonus -= 3.0
+    # On-target boost: agentic + explicit computational methods signal
+    if is_agentic and has_strong_compmats:
+        bonus += 1.0
 
     # Journal / venue prestige
     venue = f"{candidate.journal or ''} {candidate.url}".lower()
@@ -738,6 +797,19 @@ def write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+def append_feedback_report(path: Path, items: list[dict]) -> None:
+    """Append a batch of feedback items to the cumulative feedback_report.json."""
+    if path.exists():
+        try:
+            report = json.loads(path.read_text())
+        except Exception:
+            report = {"batches": []}
+    else:
+        report = {"batches": []}
+    report["batches"].append({"collected_at": utc_now_iso(), "items": items})
+    path.write_text(json.dumps(report, indent=2) + "\n")
+
+
 def bootstrap_recommendation_history_from_latest_payload(conn, payload_path: Path) -> bool:
     """Seed recommendation history from the latest saved payload if history is still empty."""
     if recommendation_history_count(conn) > 0 or not payload_path.exists():
@@ -825,6 +897,15 @@ def main() -> int:
             sys.stderr.write(f"Marked {n_synced} previously-posted papers in DB.\n")
     except Exception as exc:
         sys.stderr.write(f"Slack sync warning (non-fatal): {exc}\n")
+
+    # Collect 👍/👎 reactions from previous run's paper messages
+    try:
+        feedback_items = collect_feedback(conn)
+        if feedback_items:
+            sys.stderr.write(f"Collected feedback for {len(feedback_items)} papers.\n")
+            append_feedback_report(analysis_dir / "feedback_report.json", feedback_items)
+    except Exception as exc:
+        sys.stderr.write(f"Feedback collection warning (non-fatal): {exc}\n")
     explicit_fresh_since = parse_timestamp(args.fresh_since)
     last_recommendation_at = parse_timestamp(get_last_recommendation_at(conn))
     fresh_since = explicit_fresh_since or last_recommendation_at or run_started_at
@@ -1006,13 +1087,33 @@ def main() -> int:
         if args.post_slack:
             papers_scanned = sum(e.considered for e in search_events) if search_events else len(unseen_candidates)
             run_date = run_started_at.strftime("%B %-d, %Y")
-            slack_report = render_slack_report(
-                report_candidates=report_candidates,
-                top_three=top_three,
-                papers_scanned=papers_scanned,
-                run_date=run_date,
+
+            # Header
+            post_message(
+                f":books: *Daily Paper Digest — {run_date}*\n"
+                f"{papers_scanned} papers evaluated · "
+                f"React :thumbsup: = useful  :thumbsdown: = not relevant"
             )
-            post_report(slack_report)
+            # Top-3 detailed analysis
+            if top_three:
+                lines: list[str] = [":fire: *Top 3 Must-Read Today*", ""]
+                for i, c in enumerate(top_three, 1):
+                    lines.append(f"*{i}. {c.title}*")
+                    lines.append(f"Authors/Link: {c.authors or 'Authors unavailable'} — {c.url}")
+                    lines.append(f"Why read: {c.why_read}")
+                    lines.append(f"Takeaway: • {c.takeaway}")
+                    lines.append("")
+                lines += ["---", "Track A: Agentic AI & self-driving labs · LLM tool-use for science · Agentic DFT & materials discovery"]
+                post_message("\n".join(lines))
+            # Individual paper cards — one message per paper so reactions are trackable
+            post_message(":trophy: *Top 10 — react :thumbsup: useful  :thumbsdown: not relevant:*")
+            for i, c in enumerate(report_candidates, 1):
+                desc = _slack_oneliner(c)
+                suffix = " _(repeat)_" if c.repeat_recommendation else (" _(DB backfill)_" if not c.new_today else "")
+                text = f"{i}. *<{c.url}|{c.title}>*\n> {desc}{suffix}"
+                ts = post_message(text)
+                save_paper_slack_ts(conn, c.id, run_id, ts)
+
             sys.stderr.write("Report posted to Slack.\n")
             mark_papers_posted(conn, [c.id for c in report_candidates])
 

@@ -76,6 +76,17 @@ def _ensure_schema(conn: sqlite3.Connection):
             FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE,
             UNIQUE (run_id, paper_id)
         );
+        CREATE TABLE IF NOT EXISTS paper_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            paper_id TEXT NOT NULL,
+            slack_ts TEXT NOT NULL,
+            run_id TEXT,
+            thumbs_up INTEGER NOT NULL DEFAULT 0,
+            thumbs_down INTEGER NOT NULL DEFAULT 0,
+            fetched_at TEXT NOT NULL,
+            FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE,
+            UNIQUE(paper_id, slack_ts)
+        );
         CREATE INDEX IF NOT EXISTS idx_papers_title_hash ON papers(title_hash);
         CREATE INDEX IF NOT EXISTS idx_recommendation_history_paper_id ON recommendation_history(paper_id);
         CREATE INDEX IF NOT EXISTS idx_recommendation_history_recommended_at ON recommendation_history(recommended_at DESC);
@@ -86,6 +97,7 @@ def _ensure_schema(conn: sqlite3.Connection):
         "ALTER TABLE papers ADD COLUMN top_author_hindex INTEGER",
         "ALTER TABLE papers ADD COLUMN s2_fetched_at TEXT",
         "ALTER TABLE papers ADD COLUMN posted_at TEXT",
+        "ALTER TABLE recommendation_history ADD COLUMN slack_ts TEXT",
     ]:
         try:
             conn.execute(col_def)
@@ -245,6 +257,49 @@ def get_last_recommendation_at(conn: sqlite3.Connection) -> str | None:
     if not row:
         return None
     return row["completed_at"]
+
+
+def save_paper_slack_ts(conn: sqlite3.Connection, paper_id: str, run_id: str, slack_ts: str) -> None:
+    """Store the Slack message ts for a recommended paper so reactions can be read back later."""
+    conn.execute(
+        "UPDATE recommendation_history SET slack_ts = ? WHERE paper_id = ? AND run_id = ?",
+        (slack_ts, paper_id, run_id),
+    )
+    conn.commit()
+
+
+def get_unread_posted_messages(conn: sqlite3.Connection) -> list:
+    """Return recommendation_history rows that have a slack_ts but no feedback record yet."""
+    return conn.execute("""
+        SELECT rh.paper_id, rh.run_id, rh.slack_ts,
+               p.title, p.url
+        FROM recommendation_history rh
+        JOIN papers p ON p.id = rh.paper_id
+        WHERE rh.slack_ts IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM paper_feedback pf
+              WHERE pf.paper_id = rh.paper_id AND pf.slack_ts = rh.slack_ts
+          )
+    """).fetchall()
+
+
+def save_paper_feedback(
+    conn: sqlite3.Connection,
+    paper_id: str,
+    slack_ts: str,
+    run_id: str | None,
+    thumbs_up: int,
+    thumbs_down: int,
+    fetched_at: str | None = None,
+) -> None:
+    now = fetched_at or datetime.now().isoformat()
+    conn.execute(
+        """INSERT OR REPLACE INTO paper_feedback
+           (paper_id, slack_ts, run_id, thumbs_up, thumbs_down, fetched_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (paper_id, slack_ts, run_id, thumbs_up, thumbs_down, now),
+    )
+    conn.commit()
 
 
 def _paper_value(paper: Any, key: str, default=None):
